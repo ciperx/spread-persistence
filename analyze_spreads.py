@@ -467,6 +467,13 @@ def format_duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def _fmt_amount(value: float) -> str:
+    """Two decimals, switching to scientific notation for sub-cent token prices."""
+    if abs(value) < 0.01 and value != 0:
+        return f"{value:.2e}"
+    return f"{value:.2f}"
+
+
 def _fmt(value: float | None, suffix: str = "") -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "n/a"
@@ -519,7 +526,7 @@ def build_report(
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for row in stats:
         lines.append(
-            "| {pair} | {scans} | {covered} | {pct:.1f}% | {med} | {p95} | {mx} | {runs} | {longest} | {rt} | {pos:.1f}% | {frozen} |".format(
+            "| {pair} | {scans} | {covered} | {pct:.2f}% | {med} | {p95} | {mx} | {runs} | {longest} | {rt} | {pos:.2f}% | {frozen} |".format(
                 pair=row["pair"],
                 scans=row["scans"],
                 covered=format_duration(float(row["covered_s"])),
@@ -572,7 +579,7 @@ def build_report(
         lines.append("| Pair | Venue | Anomalous scans as outlier | Share |")
         lines.append("|---|---|---|---|")
         for _, row in counts.iterrows():
-            lines.append(f"| {row['pair']} | {row['outlier_venue']} | {int(row['count'])} | {row['share']:.1f}% |")
+            lines.append(f"| {row['pair']} | {row['outlier_venue']} | {int(row['count'])} | {row['share']:.2f}% |")
     else:
         lines.append("_No anomalous scans, so no outlier venues._")
     lines.append("")
@@ -586,7 +593,7 @@ def build_report(
             lines.append(
                 f"| {period.pair} | {period.venue} | {period.start.strftime('%H:%M:%S')} | "
                 f"{period.end.strftime('%H:%M:%S')} | {format_duration(period.duration_s)} | "
-                f"{period.out_amount:.6f} | {period.distance_bps:.2f} bps |"
+                f"{_fmt_amount(period.out_amount)} | {period.distance_bps:.2f} bps |"
             )
     else:
         lines.append("_No frozen quotes detected._")
@@ -616,7 +623,7 @@ def derive_findings(
     for row in sorted(hot, key=lambda r: float(r["pct_at_threshold"]), reverse=True)[:2]:
         findings.append(
             f"{row['pair']}: spread ≥ {params.threshold:g} bps in "
-            f"{float(row['pct_at_threshold']):.0f}% of {row['scans']} scans "
+            f"{float(row['pct_at_threshold']):.2f}% of {row['scans']} scans "
             f"(median {_fmt(row['median'])} bps, max {_fmt(row['max'])} bps)."
         )
 
@@ -636,8 +643,8 @@ def derive_findings(
         worst = max(periods, key=lambda p: p.distance_bps)
         findings.append(
             f"{len(periods)} frozen quote period(s) were excluded; the worst was {worst.venue} on "
-            f"{worst.pair}, pinned at {worst.out_amount:.6f} for {format_duration(worst.duration_s)}, "
-            f"a fake {worst.distance_bps:.0f} bps away from the best route."
+            f"{worst.pair}, pinned at {_fmt_amount(worst.out_amount)} for {format_duration(worst.duration_s)}, "
+            f"a fake {worst.distance_bps:.2f} bps away from the best route."
         )
     else:
         findings.append("No frozen venue quotes were present, so no spreads needed correcting.")
@@ -645,7 +652,7 @@ def derive_findings(
     positive = [float(row["pct_positive_round_trip"]) for row in stats]
     if positive:
         findings.append(
-            f"Round trip was positive in {sum(positive) / len(positive):.0f}% of scans on average, "
+            f"Round trip was positive in {sum(positive) / len(positive):.2f}% of scans on average, "
             "which is the share of the time a round trip would have cleared the spread."
         )
 
