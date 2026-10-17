@@ -36,7 +36,7 @@
 |---|---|---|---|---|---|---|
 | RAY/USDC | Phoenix | 2026-10-17 19:23:59 | 2026-10-17 19:25:02 | 1m 03s | 1.68 | 1629.20 bps |
 
-Disagreements with the `stale` column: **4**
+Disagreements with the `stale` column: **0**
 
 ## Findings
 

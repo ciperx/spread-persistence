@@ -83,7 +83,9 @@ def build(scans: int, seed: int = 7) -> list[list[str]]:
 
             for venue, price in quotes.items():
                 vs_best = (price / best_price - 1) * 10_000
-                stale = "true" if (frozen and venue == "Phoenix") else "false"
+                # the scanner only flags a quote stale once it has seen enough
+                # repeats: the 5th and 6th identical quotes of the stretch
+                stale = "true" if (frozen and venue == "Phoenix" and index >= 204) else "false"
                 rows.append(
                     [
                         iso, str(slot), pair, amounts[pair], venue,
