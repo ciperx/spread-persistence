@@ -29,12 +29,12 @@ Files in the repository:
 | file | purpose |
 |---|---|
 | `analyze_spreads.py` | the analyser (742 lines, typed, documented) |
-| `tests/test_analyze_spreads.py` | 21 pytest cases, all fixtures built in-test |
+| `tests/test_analyze_spreads.py` | 22 pytest cases, all fixtures built in-test |
 | `tools/make_demo_data.py` | deterministic generator for the demo fixture |
 | `demo/spreads_demo.csv` | 8,400-row fixture with two injected behaviours |
 | `demo/report.md` | the report produced from that fixture |
 | `README.md` | install, usage, method, limitations |
-| `requirements.txt` | `pandas>=2.0` |
+| `requirements.txt` | `pandas>=2.0`, `pytest>=7.0` |
 
 ---
 
@@ -70,16 +70,20 @@ moves around it.
 * a **changed** quote resets the venue's counter to zero;
 * a **flat market** (neither the venue nor the best route moved) leaves the
   counter untouched, so a quiet venue is never punished for being quiet;
-* at `--stale-scans − 1` repeats (4 by default, i.e. the 5th identical scan) the
-  venue is frozen — and the **whole identical stretch** is marked frozen, since
-  the earlier copies are exactly as fake as the last one;
+* the quote that reaches `--stale-scans − 1` repeats (4 by default, i.e. the 5th
+  identical scan) is frozen, and every repeat after it stays frozen. A quote is
+  judged on the evidence available at its own timestamp, so the earlier copies
+  of the same number are **not** reclassified retroactively — five identical
+  quotes are needed before the quote can be called frozen;
 * the logged `stale` column is **ignored for detection** and used only for the
   disagreement count in the report.
 
 ## 3. Per-scan aggregation and persistent runs (weight 0.25)
 
-All venue rows of one `(pair, timestamp)` collapse into a single scan. The
-spread is recomputed from **non-frozen single venues only**:
+All venue rows of one `(pair, timestamp)` collapse into a single scan. **Every
+scan keeps its row**, including scans whose venues are all frozen: dropping them
+would understate the scan counts and let an anomalous run bridge across the
+hole. The spread is recomputed from **non-frozen single venues only**:
 
 ```
 spread_bps = (max_price / min_price − 1) × 10 000
@@ -109,16 +113,17 @@ numeric value is rendered to **two decimals**; durations use the exact
 ```
 $ python -m pytest tests -q
 .....................
-21 passed in 2.42s
+22 passed in 3.82s
 ```
 
 No network access, no external fixtures — every CSV is generated inside the
 test. Coverage includes: exact threshold boundary (30 bps counts), run of
 exactly `min_scans` vs one short, gap splitting a run, a single sub-threshold
 scan splitting a run, per-pair independence, malformed rows counted not fatal,
-comma-bearing routes, empty `round_trip_bps`, single-venue scans, all-frozen
-input, 5-vs-4 identical quotes, flat-market non-detection, the frozen venue's
-fake 1,500 bps spread disappearing after exclusion, the 12-column format, and
+comma-bearing routes, empty `round_trip_bps`, single-venue scans, 5-vs-4
+identical quotes, flat-market non-detection, a scan whose venues are all frozen
+keeping its row and splitting the run, the frozen venue's fake 1,500 bps spread
+disappearing from the scans after the freeze point, the 12-column format, and
 `stale`-flag disagreement counting.
 
 ## 6. Must-pass criteria
@@ -128,7 +133,9 @@ fake 1,500 bps spread disappearing after exclusion, the 12-column format, and
   `pandas>=2.0`.
 * **Offline** — no `requests`, `urllib`, `socket`, or subprocess calls anywhere
   in the analyser.
-* **pytest** — the suite above ships in `tests/`.
+* **pytest** — the suite above ships in `tests/`, and `pytest` is listed in
+  `requirements.txt` so `pip install -r requirements.txt && pytest` works in a
+  clean environment.
 * **No hardcoded results** — every table row, percentage, duration and finding
   is derived from the parsed frame; the only literals are parameter defaults
   and column names.

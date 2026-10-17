@@ -67,6 +67,12 @@ def moving_venues(index: int, bps: float) -> dict[str, float]:
     return {"Raydium": round(low, 10), "Whirlpool": round(low * (1 + bps / 10_000), 10)}
 
 
+def load_and_detect(path: Path, stale_scans: int = 5):
+    """Load a fixture and run frozen detection on it."""
+    load = mod.load_spreads(path)
+    return mod.detect_frozen(load.frame, stale_scans)
+
+
 def analyse(path: Path, **kwargs) -> tuple[pd.DataFrame, list, list, mod.LoadResult, list]:
     """Run the pipeline and hand back every intermediate stage."""
     params = Params(**kwargs)
@@ -231,43 +237,82 @@ def frozen_rows(scans: int, *, move_best: bool = True, stale: str = "") -> list[
 
 
 def test_five_identical_quotes_while_market_moves_is_frozen(tmp_path: Path) -> None:
-    frame, periods = mod.detect_frozen(
-        mod.load_spreads(write(tmp_path, frozen_rows(5))).frame, stale_scans=5
-    )
-    phoenix = frame.loc[frame["venue"] == "Phoenix"]
+    """The 5th identical quote is frozen — and only it, never the earlier ones."""
+    path = write(tmp_path, frozen_rows(5))
+    frame, periods = load_and_detect(path, stale_scans=5)
 
-    assert phoenix["frozen"].all()
+    frozen = frame.loc[frame["frozen"]]
+    assert len(frozen) == 1
+    assert frozen["venue"].iloc[0] == "Phoenix"
+    assert frozen["timestamp"].iloc[0] == BASE + timedelta(seconds=4 * 105)
+
     assert len(periods) == 1
-    assert periods[0].venue == "Phoenix"
-    assert periods[0].start == BASE
-    assert periods[0].end == BASE + timedelta(seconds=4 * 105)
+    period = periods[0]
+    assert period.venue == "Phoenix"
+    assert period.start == BASE + timedelta(seconds=4 * 105)
+    assert period.end == period.start
+    assert period.duration_s == 0.0
 
 
 def test_four_identical_quotes_are_not_frozen(tmp_path: Path) -> None:
-    frame, periods = mod.detect_frozen(
-        mod.load_spreads(write(tmp_path, frozen_rows(4))).frame, stale_scans=5
-    )
-    assert not frame.loc[frame["venue"] == "Phoenix", "frozen"].any()
+    path = write(tmp_path, frozen_rows(4))
+    frame, periods = load_and_detect(path, stale_scans=5)
+    assert not frame["frozen"].any()
     assert periods == []
 
 
 def test_identical_quotes_in_a_flat_market_are_not_frozen(tmp_path: Path) -> None:
-    frame, periods = mod.detect_frozen(
-        mod.load_spreads(write(tmp_path, frozen_rows(8, move_best=False))).frame,
-        stale_scans=5,
-    )
+    """Nothing moved at all — a quiet venue is not evidence of a stale quote."""
+    rows = []
+    for i in range(8):
+        rows += scan(i * 105, "SOL/USDC", 103.0, {"Raydium": 102.9, "Orca": 102.95})
+    path = write(tmp_path, rows)
+    frame, periods = load_and_detect(path, stale_scans=5)
     assert not frame["frozen"].any()
     assert periods == []
 
 
 def test_frozen_venue_fake_spread_disappears(tmp_path: Path) -> None:
-    """Phoenix's 1,500 bps fake spread must vanish once the quote is excluded."""
-    path = write(tmp_path, frozen_rows(6))
-    scans, runs, periods, _, _ = analyse(path, threshold=30, min_scans=1)
+    """Once Phoenix is frozen its 1,500 bps fake spread leaves the calculation."""
+    path = write(tmp_path, frozen_rows(7))
+    scans, _, periods, _, _ = analyse(path, threshold=30, min_scans=1)
 
-    assert scans["spread_bps"].max() == pytest.approx(4.85, abs=0.01)
-    assert runs == []
-    assert any(p.venue == "Phoenix" for p in periods)
+    assert len(periods) == 1
+    freeze_at = BASE + timedelta(seconds=4 * 105)
+    after = scans.loc[scans["timestamp"] >= freeze_at]
+    before = scans.loc[scans["timestamp"] < freeze_at]
+
+    # before the freeze the fake spread is still there: five identical quotes are
+    # needed before it can be called frozen, so the first four scans cannot know
+    assert before["spread_bps"].min() > 1_000
+    # from the moment the quote is frozen only Raydium/Whirlpool remain
+    assert after["spread_bps"].max() == pytest.approx(4.85, abs=0.05)
+    assert (after["venues"] == 2).all()
+
+
+def test_zero_live_venue_scan_is_retained_and_breaks_runs(tmp_path: Path) -> None:
+    """A scan whose venues are all frozen keeps its row and splits the run."""
+    rows = []
+    for i in range(8):
+        rows += scan(
+            i * 105,
+            "SOL/USDC",
+            best=103.0 + 0.05 * i,
+            venues={"A": 100.0, "B": 100.3, "C": 100.6},
+        )
+    path = write(tmp_path, rows)
+    scans, runs, periods, _, _ = analyse(path, threshold=30, min_scans=4)
+
+    assert len(scans) == 8, "every scan must survive, even with zero live venues"
+    assert len(periods) == 3, "all three venues freeze at the same scan"
+    frozen_scans = scans.loc[scans["venues"] == 0]
+    assert len(frozen_scans) == 4
+    assert frozen_scans["spread_bps"].isna().all()
+
+    # the four anomalous scans before the freeze form a run that stops there
+    assert len(runs) == 1
+    assert runs[0].scans == 4
+    assert runs[0].end == BASE + timedelta(seconds=3 * 105)
 
 
 def test_twelve_column_file_without_stale_loads(tmp_path: Path) -> None:

@@ -89,14 +89,19 @@ a real quote cannot stay bit-identical while the market moves around it.
 * a changed quote resets that venue's counter to zero;
 * a flat market (nothing moved, including the best route) leaves the counter
   alone, so a quiet venue is never punished for being quiet;
-* at `--stale-scans − 1` repeats (4 by default, i.e. the 5th identical scan) the
-  venue is frozen, and the **whole identical stretch** is marked frozen — the
-  earlier copies are exactly as fake as the last one.
+* the quote that reaches `--stale-scans − 1` repeats (4 by default, i.e. the 5th
+  identical scan) is frozen, and every repeat after it stays frozen — a quote is
+  judged on the evidence available at its own timestamp, so earlier copies of
+  the same number are **not** reclassified retroactively. The first four scans
+  of a stale stretch therefore still show the spread: five identical quotes are
+  needed before it can be called frozen.
 
 ### 2. One row per scan
 
-All venue rows of a `(pair, timestamp)` collapse into one scan. The spread is
-recomputed from non-frozen single venues only:
+All venue rows of a `(pair, timestamp)` collapse into one scan. **Every scan in
+the input keeps its row**, including scans whose venues are all frozen: dropping
+them would understate the scan counts and let an anomalous run bridge across the
+hole. The spread is recomputed from non-frozen single venues only:
 
 ```
 spread_bps = (max_price / min_price - 1) * 10_000
@@ -126,7 +131,7 @@ data — no hard-coded prose.
 
 ```bash
 pip install pytest
-python -m pytest tests -q      # 21 passed
+python -m pytest tests -q      # 22 passed
 ```
 
 The suite builds every fixture in-test and covers the cases that decide whether
@@ -139,9 +144,11 @@ the numbers can be trusted:
 * malformed rows are skipped and counted, not fatal;
 * routes containing commas survive parsing;
 * empty `round_trip_bps` is tolerated;
-* 5 identical quotes while the market moves are frozen, 4 are not, and
-  identical quotes in a flat market are never frozen;
-* a frozen venue's fake 1,500 bps spread disappears after exclusion;
+* the 5th identical quote is frozen and the first four are not, identical quotes
+  in a flat market are never frozen, and a scan whose venues are all frozen
+  keeps its row and splits the run;
+* a frozen venue's fake 1,500 bps spread disappears from the scans after the
+  freeze point;
 * the 12-column format loads without a `stale` column;
 * a `stale` flag that disagrees with the detector is counted, not trusted.
 

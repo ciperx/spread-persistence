@@ -213,9 +213,10 @@ def detect_frozen(frame: pd.DataFrame, stale_scans: int) -> tuple[pd.DataFrame, 
     A quote is a *repeat* when its ``out_amount`` equals that venue's previous
     quote for the pair **and** the best route moved in between. Repeats are
     counted per (pair, venue); a changing quote resets the counter, and a flat
-    market leaves it untouched. Once ``stale_scans - 1`` repeats have
-    accumulated the whole identical stretch is marked frozen, because those
-    earlier copies are equally fake.
+    market leaves it untouched. The quote that reaches ``stale_scans - 1``
+    repeats is frozen, and so is every repeat after it — a quote is judged on
+    the evidence available at its own timestamp, so earlier copies of the same
+    number are not reclassified retroactively.
     """
     frame = frame.copy()
     best = _best_route_changes(frame)
@@ -231,7 +232,6 @@ def detect_frozen(frame: pd.DataFrame, stale_scans: int) -> tuple[pd.DataFrame, 
         moved = group["best_changed"].to_numpy()
 
         repeats = 0
-        streak: list[int] = []
         previous: float | None = None
 
         for offset in range(len(positions)):
@@ -239,13 +239,11 @@ def detect_frozen(frame: pd.DataFrame, stale_scans: int) -> tuple[pd.DataFrame, 
             if previous is not None and value == previous:
                 if moved[offset]:
                     repeats += 1
-                streak.append(int(positions[offset]))
             else:
                 repeats = 0
-                streak = [int(positions[offset])]
 
             if repeats >= stale_scans - 1:
-                frame.loc[streak, "frozen"] = True
+                frame.loc[positions[offset], "frozen"] = True
             previous = value
 
     periods = _frozen_periods(frame)
@@ -295,21 +293,44 @@ def _frozen_periods(frame: pd.DataFrame) -> list[FrozenPeriod]:
 # Per-scan aggregation
 # --------------------------------------------------------------------------- #
 def collapse_scans(frame: pd.DataFrame) -> pd.DataFrame:
-    """Reduce venue rows to one row per (pair, timestamp) with a recomputed spread."""
-    live = frame.loc[(frame["venue"] != BEST_VENUE) & (~frame["frozen"])]
+    """Reduce venue rows to one row per (pair, timestamp) with a recomputed spread.
 
-    if live.empty:
-        return _empty_scans()
-
-    grouped = live.groupby(["pair", "timestamp"]).agg(
-        max_price=("price", "max"),
-        min_price=("price", "min"),
-        venues=("price", "size"),
+    Every scan present in the input is kept, including scans whose venues are
+    all frozen. Such a scan has an *undefined* spread — not a zero spread — and
+    must stay in the counts: dropping it would understate ``scans analysed`` and
+    let an anomalous run bridge across the hole.
+    """
+    all_scans = (
+        frame.groupby(["pair", "timestamp"], sort=False)
+        .size()
+        .rename("rows")
+        .reset_index()
     )
-    grouped["spread_bps"] = (
-        (grouped["max_price"] / grouped["min_price"] - 1.0) * 10_000.0
-    ).round(6)
-    grouped.loc[grouped["venues"] < 2, "spread_bps"] = float("nan")
+
+    live = frame.loc[(frame["venue"] != BEST_VENUE) & (~frame["frozen"])]
+    if live.empty:
+        grouped = all_scans.assign(
+            max_price=float("nan"),
+            min_price=float("nan"),
+            venues=0,
+            spread_bps=float("nan"),
+        )
+    else:
+        grouped = (
+            live.groupby(["pair", "timestamp"])
+            .agg(
+                max_price=("price", "max"),
+                min_price=("price", "min"),
+                venues=("price", "size"),
+            )
+            .reset_index()
+        )
+        grouped["spread_bps"] = (
+            (grouped["max_price"] / grouped["min_price"] - 1.0) * 10_000.0
+        ).round(6)
+        grouped.loc[grouped["venues"] < 2, "spread_bps"] = float("nan")
+        grouped = all_scans.merge(grouped, on=["pair", "timestamp"], how="left")
+        grouped["venues"] = grouped["venues"].fillna(0).astype(int)
 
     round_trip = (
         frame.dropna(subset=["round_trip_bps"])[
@@ -335,25 +356,9 @@ def collapse_scans(frame: pd.DataFrame) -> pd.DataFrame:
             .reset_index(drop=True)
         )
 
-    scans = grouped.reset_index().merge(round_trip, on=["pair", "timestamp"], how="left")
+    scans = grouped.merge(round_trip, on=["pair", "timestamp"], how="left")
     scans = scans.merge(outlier, on=["pair", "timestamp"], how="left")
     return scans.sort_values(["pair", "timestamp"]).reset_index(drop=True)
-
-
-def _empty_scans() -> pd.DataFrame:
-    """A scans frame with the right dtypes, for input where nothing survived."""
-    return pd.DataFrame(
-        {
-            "pair": pd.Series(dtype="object"),
-            "timestamp": pd.Series(dtype="datetime64[ns, UTC]"),
-            "max_price": pd.Series(dtype="float64"),
-            "min_price": pd.Series(dtype="float64"),
-            "venues": pd.Series(dtype="int64"),
-            "spread_bps": pd.Series(dtype="float64"),
-            "round_trip_bps": pd.Series(dtype="float64"),
-            "outlier_venue": pd.Series(dtype="object"),
-        }
-    )
 
 
 def find_runs(scans: pd.DataFrame, params: Params) -> list[Run]:
@@ -554,7 +559,7 @@ def build_report(
         lines.append("|---|---|---|---|---|---|---|---|---|")
         for run in runs:
             lines.append(
-                f"| {run.pair} | {run.start.strftime('%H:%M:%S')} | {run.end.strftime('%H:%M:%S')} | "
+                f"| {run.pair} | {run.start.strftime('%Y-%m-%d %H:%M:%S')} | {run.end.strftime('%Y-%m-%d %H:%M:%S')} | "
                 f"{format_duration(run.duration_s)} | {run.scans} | {run.mean_spread:.2f} | "
                 f"{run.max_spread:.2f} | {run.dominant_outlier} | {_fmt(run.mean_round_trip)} |"
             )
@@ -591,8 +596,8 @@ def build_report(
         lines.append("|---|---|---|---|---|---|---|")
         for period in periods:
             lines.append(
-                f"| {period.pair} | {period.venue} | {period.start.strftime('%H:%M:%S')} | "
-                f"{period.end.strftime('%H:%M:%S')} | {format_duration(period.duration_s)} | "
+                f"| {period.pair} | {period.venue} | {period.start.strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"{period.end.strftime('%Y-%m-%d %H:%M:%S')} | {format_duration(period.duration_s)} | "
                 f"{_fmt_amount(period.out_amount)} | {period.distance_bps:.2f} bps |"
             )
     else:
